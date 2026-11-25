@@ -57,7 +57,7 @@ bt = load_backtest()
 
 st.title("Мониторинг и прогноз качества воздуха по городам Беларуси")
 page = st.sidebar.radio("Навигация", ["Обзор", "Машина времени", "Динамика и сравнение",
-                                      "Прогноз", "О данных"])
+                                      "Прогноз", "Экопаспорт и сценарии", "О данных"])
 pol = st.sidebar.selectbox("Загрязняющее вещество", sorted(air["pollutant"].unique()),
                            format_func=lambda p: POLLUTANT_LABELS.get(p, p))
 
@@ -146,7 +146,82 @@ elif page == "Прогноз":
         st.caption("Меньше — лучше. Прогноз подписан как оценка тренда; "
                    "интервал построен бутстрэпом остатков бэктеста.")
 
-else:  # О данных
+elif page == "Экопаспорт и сценарии":
+    import io
+    import sys
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import plotly.graph_objects as go
+
+    sys.path.insert(0, str(ROOT / "src" / "features"))
+    from passport import build, score_with
+
+    base = build()
+    st.subheader("Экопаспорт региона")
+    region = st.selectbox("Регион", base["region"].tolist())
+    c1, c2, c3 = st.columns(3)
+    w_air = c1.slider("Вес блока «воздух»", 0, 100, 33)
+    w_water = c2.slider("Вес блока «вода»", 0, 100, 34)
+    w_waste = c3.slider("Вес блока «отходы»", 0, 100, 33)
+    weights = {"air": w_air, "water": w_water, "waste": w_waste}
+
+    st.markdown("**Режим «что если»** — измените показатели, индекс пересчитается "
+                "(сценарная оценка, не прогноз):")
+    s1, s2, s3 = st.columns(3)
+    m_air = s1.slider("Воздух: изменение, %", -50, 50, 0)
+    m_water = s2.slider("Вода: изменение, %", -50, 50, 0)
+    m_waste = s3.slider("Отходы: изменение, %", -50, 50, 0)
+    multipliers = {"air": 1 + m_air / 100, "water": 1 + m_water / 100,
+                   "waste": 1 + m_waste / 100}
+
+    scen = score_with(base, weights, multipliers)
+    baseline = score_with(base, weights)
+    row_s = scen[scen["region"] == region].iloc[0]
+    row_b = baseline[baseline["region"] == region].iloc[0]
+
+    k1, k2 = st.columns(2)
+    k1.metric("Индекс региона (сценарий)", f"{row_s['index']:.1f}")
+    k2.metric("Индекс без изменений", f"{row_b['index']:.1f}")
+
+    labels = ["Воздух", "Вода", "Отходы"]
+    vals_s = [row_s["air_score"], row_s["water_score"], row_s["waste_score"]]
+    vals_b = [row_b["air_score"], row_b["water_score"], row_b["waste_score"]]
+    fig = go.Figure()
+    fig.add_trace(go.Scatterpolar(r=vals_b + [vals_b[0]], theta=labels + [labels[0]],
+                                  name="без изменений", line=dict(dash="dash")))
+    fig.add_trace(go.Scatterpolar(r=vals_s + [vals_s[0]], theta=labels + [labels[0]],
+                                  name="сценарий", fill="toself"))
+    fig.update_layout(height=480, polar=dict(radialaxis=dict(range=[0, 100])),
+                      title=f"Профиль: {region} (100 — лучшее среди регионов)")
+    st.plotly_chart(fig, width='stretch')
+
+    st.subheader("Рейтинг регионов (сценарий)")
+    st.dataframe(scen.sort_values("index", ascending=False).round(1), width='stretch')
+
+    fig_m = plt.figure(figsize=(6, 6))
+    ax = fig_m.add_subplot(111, polar=True)
+    ang = [0, 2 * 3.14159265 / 3, 4 * 3.14159265 / 3, 0]
+    ax.plot(ang, vals_b + [vals_b[0]], "--", label="без изменений")
+    ax.plot(ang, vals_s + [vals_s[0]], "-", label="сценарий")
+    ax.fill(ang, vals_s + [vals_s[0]], alpha=0.2)
+    ax.set_xticks(ang[:-1])
+    ax.set_xticklabels(labels)
+    ax.set_ylim(0, 100)
+    ax.set_title(f"Экопаспорт: {region}")
+    ax.legend(loc="lower right", fontsize=8)
+    buf = io.BytesIO()
+    fig_m.savefig(buf, format="png", dpi=130, bbox_inches="tight")
+    plt.close(fig_m)
+    st.download_button("Скачать карточку региона (PNG)", buf.getvalue(),
+                       file_name=f"ecopassport_{region}.png", mime="image/png")
+    st.caption("Методика: блоки «воздух» (концентрация/ПДК), «вода» (сброс вод), "
+               "«отходы» (образование отходов), min-max нормировка по регионам, "
+               "взвешенная сумма. Минская область: блок «воздух» отсутствует "
+               "(нет городов в наборе) — индекс по двум блокам. Не является официальной оценкой.")
+
+elif page == "О данных":
     st.markdown("""
 **Источники данных (оффлайн, лежат в `data/`):**
 

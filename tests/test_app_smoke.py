@@ -12,7 +12,7 @@ at.run()
 assert not at.exception, f"Обзор: {at.exception}"
 print("Обзор: ok, заголовок:", at.title[0].value)
 
-for page in ["Машина времени", "Динамика и сравнение", "Прогноз", "О данных"]:
+for page in ["Машина времени", "Динамика и сравнение", "Прогноз", "Экопаспорт и сценарии", "О данных"]:
     at.radio[0].set_value(page).run()
     assert not at.exception, f"{page}: {at.exception}"
     print(f"{page}: ok")

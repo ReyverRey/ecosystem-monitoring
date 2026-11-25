@@ -205,9 +205,15 @@ plt.close(fig)
 # ---------- финальный прогноз 2026-2028 ----------
 best_model = {int(r["horizon"]): r["model"] for _, r in best.iterrows()}
 fc_rows = []
-resid_by_h = {h: (bt[(bt["model"] == best_model[h]) & (bt["horizon"] == h)]["y_true"]
-                  - bt[(bt["model"] == best_model[h]) & (bt["horizon"] == h)]["y_pred"]).values
-              for h in HORIZONS}
+# остатки бэктеста — по каждой серии отдельно (масштабы городов и загрязнителей различаются);
+# при малом числе остатков фолбэк на загрязнитель, затем на все серии
+resid_by_key = {}
+for h in HORIZONS:
+    g = bt[(bt["model"] == best_model[h]) & (bt["horizon"] == h)]
+    for key, gg in g.groupby(["city", "pollutant"]):
+        resid_by_key[(h,) + key] = (gg["y_true"] - gg["y_pred"]).values
+    for pol_, gg in g.groupby("pollutant"):
+        resid_by_key[(h, pol_)] = (gg["y_true"] - gg["y_pred"]).values
 
 for (city, pol), s in conc.groupby(["city", "pollutant"]):
     s = s.set_index("year")["value"].sort_index()
@@ -224,9 +230,13 @@ for (city, pol), s in conc.groupby(["city", "pollutant"]):
             yhat = pred[model] if pred else None
         if yhat is None:
             continue
-        res = resid_by_h[h]
+        for cand in ((h, city, pol), (h, pol)):
+            res = resid_by_key.get(cand, np.array([]))
+            if len(res) >= 4:
+                break
         boots = yhat + RNG.choice(res, size=(BOOTSTRAP_N,), replace=True) if len(res) else np.array([yhat])
         lo, hi = np.percentile(boots, [2.5, 97.5])
+        lo = max(0.0, float(lo))  # концентрация не может быть отрицательной
         fc_rows.append({"city": city, "pollutant": pol, "year": target_year,
                         "model": model, "forecast": round(yhat, 2),
                         "lo_95": round(float(lo), 2), "hi_95": round(float(hi), 2)})

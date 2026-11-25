@@ -4,6 +4,7 @@
 Страницы: Обзор, Машина времени, Динамика и сравнение, Прогноз, О данных.
 Данные: data/processed/*.csv (offline, без внешних API — по ТЗ).
 """
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,11 @@ ROOT = Path(__file__).resolve().parents[1]
 PROC = ROOT / "data" / "processed"
 
 st.set_page_config(page_title="Мониторинг экосистемы", page_icon="🌿", layout="wide")
+
+sys.path.insert(0, str(ROOT / "src" / "features"))
+sys.path.insert(0, str(ROOT / "app"))
+import tamagotchi as tg  # noqa: E402
+from passport import build as build_passport  # noqa: E402
 
 CITY_COORDS = {
     "Минск": (53.90, 27.57), "Гомель": (52.43, 30.98), "Могилев": (53.91, 30.34),
@@ -57,9 +63,26 @@ bt = load_backtest()
 
 st.title("Мониторинг и прогноз качества воздуха по городам Беларуси")
 page = st.sidebar.radio("Навигация", ["Обзор", "Машина времени", "Динамика и сравнение",
-                                      "Прогноз", "Экопаспорт и сценарии", "О данных"])
+                                      "Прогноз", "Тамагочи и квиз", "Экопаспорт и сценарии",
+                                      "О данных"])
 pol = st.sidebar.selectbox("Загрязняющее вещество", sorted(air["pollutant"].unique()),
                            format_func=lambda p: POLLUTANT_LABELS.get(p, p))
+
+# ---- питомец в боковой панели (ТЗ 4.5) ----
+st.sidebar.divider()
+st.sidebar.markdown("### 🐾 Хранитель региона")
+passport_df = build_passport()
+pet_region = st.sidebar.selectbox("Регион питомца", passport_df["region"].tolist(),
+                                  key="pet_region")
+health = passport_df.loc[passport_df["region"] == pet_region, "index_equal_weights"].iloc[0]
+health = None if pd.isna(health) else float(health)
+pet_state = tg.get_state()
+st.sidebar.markdown(f"**Уровень {pet_state['level']}** · опыт: {pet_state['xp']}")
+st.sidebar.progress(int(pet_state["satiety"]),
+                    text=f"Сытость: {pet_state['satiety']:.0f}/100")
+if health is not None:
+    st.sidebar.progress(int(health), text=f"Здоровье: {health:.0f}/100")
+st.sidebar.caption(tg.mood(pet_state["satiety"], health))
 
 if page == "Обзор":
     year = st.slider("Год", int(air["year"].min()), int(air["year"].max()),
@@ -145,6 +168,94 @@ elif page == "Прогноз":
         st.dataframe(m.round(2), width='stretch')
         st.caption("Меньше — лучше. Прогноз подписан как оценка тренда; "
                    "интервал построен бутстрэпом остатков бэктеста.")
+
+elif page == "Тамагочи и квиз":
+    import random
+
+    st.header("🐾 Тамагочи — хранитель региона")
+    st.markdown("Кормите питомца верными ответами: правильный ответ — порция еды. "
+                "За один и тот же вопрос награда даётся не чаще раза в сутки.")
+    questions = tg.load_questions()
+    mode = st.radio("Режим", ["Квиз", "Угадай год"], horizontal=True)
+
+    if mode == "Квиз":
+        cats = ["все"] + sorted({q["category"] for q in questions})
+        cat = st.selectbox("Категория", cats)
+        pool = questions if cat == "все" else [q for q in questions if q["category"] == cat]
+        qid = st.session_state.get("quiz_qid")
+        if qid is None or not any(q["id"] == qid for q in pool):
+            qid = random.choice(pool)["id"]
+            st.session_state.quiz_qid = qid
+        q = next(q for q in questions if q["id"] == qid)
+        st.subheader(q["question"])
+        st.caption(f"Источник: {q['source']}")
+        choice = st.radio("Вариант ответа", q["options"], key=f"opt_{qid}")
+        if st.session_state.get("quiz_feedback_qid") == qid:
+            st.info(st.session_state.quiz_feedback)
+            if st.button("Следующий вопрос"):
+                st.session_state.pop("quiz_qid", None)
+                st.session_state.pop("quiz_feedback_qid", None)
+                st.rerun()
+        elif st.button("Ответить"):
+            correct = choice == q["options"][q["answer"]]
+            rewarded_before = tg.can_reward(q["id"])
+            tg.record_answer(q["id"], correct)
+            if correct and rewarded_before:
+                tg.feed(10)
+                msg = "Верно! Питомец получил порцию еды (+10 опыта)."
+            elif correct:
+                msg = "Верно! Но за этот вопрос награда уже была в течение суток."
+            else:
+                msg = "Неверно. Попробуйте другой вопрос."
+            st.session_state.quiz_feedback = msg
+            st.session_state.quiz_feedback_qid = qid
+            st.rerun()
+
+    else:  # Угадай год
+        if "guess" not in st.session_state or st.session_state.get("guess_done"):
+            st.session_state.guess = tg.prepare_guess(rng=random.Random())
+            st.session_state.guess_done = False
+        g = st.session_state.guess
+        if g is None:
+            st.warning("Недостаточно данных для режима.")
+        else:
+            label = POLLUTANT_LABELS.get(g["pollutant"], g["pollutant"])
+            st.subheader(f"Как изменится {label} в {g['city']}?")
+            st.caption(f"Ряд с пропущенным годом; значение {g['prev_year']} года: "
+                       f"{g['prev']:.1f}. Угадайте {g['hidden_year']} год.")
+            st.line_chart(pd.Series(g["visible"]).sort_index(), height=280)
+            c1, c2 = st.columns(2)
+            direction = c1.radio("Направление", ["рост", "снижение"])
+            magnitude = c2.radio("Размер изменения", ["до 5%", "5-15%", "более 15%"])
+            if not st.session_state.guess_done:
+                if st.button("Проверить"):
+                    res = tg.evaluate_guess(direction, magnitude, g["actual_pct"])
+                    mid = {"до 5%": 2.5, "5-15%": 10.0, "более 15%": 20.0}[magnitude]
+                    est = mid if direction == "рост" else -mid
+                    tg.record_guess(g["hidden_year"], direction, magnitude,
+                                    g["actual_pct"], abs(est - g["actual_pct"]))
+                    if res["points"]:
+                        tg.feed(res["points"])
+                    st.session_state.guess_done = True
+                    st.session_state.guess_result = res
+                    st.rerun()
+            else:
+                res = st.session_state.guess_result
+                st.markdown(f"**Факт:** {g['actual']:.1f} ({g['actual_pct']:+.1f}% "
+                            f"к {g['prev_year']} году) — {res['actual_dir']}, {res['actual_mag']}.")
+                st.markdown(f"**Награда:** +{res['points']} еды.")
+                if st.button("Ещё раз"):
+                    st.session_state.guess_done = False
+                    st.session_state.pop("guess", None)
+                    st.rerun()
+            stats = tg.guess_stats()
+            if stats["n"]:
+                st.markdown("---")
+                st.markdown(f"**Ваша точность:** попыток {stats['n']}, средняя ошибка "
+                            f"{stats['mean_abs_error']:.1f} п.п.; наивная модель "
+                            f"(«без изменений») — {stats['naive_mean_abs_error']:.1f} п.п.")
+                st.caption("Сравнение «человек против наивной модели» — научная часть "
+                           "работы: результаты режима сопоставляются с точностью прогноза.")
 
 elif page == "Экопаспорт и сценарии":
     import io
